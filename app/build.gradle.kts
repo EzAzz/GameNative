@@ -45,6 +45,13 @@ android {
     ndkVersion = "27.3.13750724"
 
     signingConfigs {
+        // Fixed key for the Thor span perf builds so each CI build installs over the last one.
+        create("thorspan") {
+            storeFile = file("thor-span.jks")
+            storePassword = "thorspan"
+            keyAlias = "thor"
+            keyPassword = "thorspan"
+        }
         create("pluvia") {
             if (keystoreProperties != null) {
                 storeFile = file(keystoreProperties["storeFile"].toString())
@@ -200,6 +207,15 @@ android {
             matchingFallbacks += listOf("debug")
             buildConfigField("boolean", "SPAN_DEFAULT", "true")
             buildConfigField("String", "SPAN_BOTTOM_DEFAULT", "\"left\"")
+        }
+        // Span perf test build: spantest + throttled bottom panel + SpanPerf timing log.
+        // Installs next to Span Test (own app id), signed with a fixed key.
+        create("spanperf") {
+            initWith(getByName("spantest"))
+            applicationIdSuffix = ".spanperf"
+            resValue("string", "app_name", "Span Perf")
+            signingConfig = signingConfigs.getByName("thorspan")
+            matchingFallbacks += listOf("debug")
         }
         create("release-gold") {
             isMinifyEnabled = true

@@ -508,11 +508,69 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
         }
     }
 
+    // Span perf: per-2s timing of the Present path (tag SpanPerf). Primary renderer only.
+    private long perfWindowStart = 0, perfPrimaryNs = 0, perfMirrorNs = 0, perfProbeNs = 0, perfMaxNs = 0;
+    private int perfFrames = 0, perfMirrorFrames = 0;
+    private String perfPath = "?";
+
     public void onUpdateWindowContentDirect(Window window, Drawable pixmap, short xOff, short yOff) {
+        final long t0 = System.nanoTime();
         onUpdateWindowContentDirectImpl(window, pixmap, xOff, yOff);
+        final long t1 = System.nanoTime();
+        try {
+            onUpdateWindowContentDirectRest(window, pixmap, xOff, yOff, t1);
+        } finally {
+            if (!isMirror) perfRecord(pixmap, t0, t1, System.nanoTime());
+        }
+    }
+
+    private long perfMirrorStart = 0, perfMirrorEnd = 0;
+
+    private void perfRecord(Drawable pixmap, long t0, long t1, long t3) {
+        if (perfWindowStart == 0) perfWindowStart = t0;
+        perfFrames++;
+        perfPrimaryNs += t1 - t0;
+        if (perfMirrorEnd > perfMirrorStart) { perfMirrorNs += perfMirrorEnd - perfMirrorStart; perfMirrorFrames++; }
+        perfProbeNs += t3 - Math.max(t1, perfMirrorEnd);
+        perfMaxNs = Math.max(perfMaxNs, t3 - t0);
+        perfMirrorStart = perfMirrorEnd = 0;
+        if (pixmap != null && "?".equals(perfPath)) {
+            Object tex = pixmap.getTexture();
+            perfPath = tex == null ? "none(SHM?)" : tex.getClass().getSimpleName();
+        }
+        long span = t3 - perfWindowStart;
+        if (span >= 2_000_000_000L) {
+            double secs = span / 1e9;
+            android.util.Log.i("SpanPerf", String.format(java.util.Locale.US,
+                "presents/s=%.1f path=%s primary=%.2fms mirror=%.2fms(%d) probe=%.2fms max=%.2fms every=%d mirrors=%d",
+                perfFrames / secs, perfPath,
+                perfPrimaryNs / 1e6 / perfFrames,
+                perfMirrorFrames > 0 ? perfMirrorNs / 1e6 / perfMirrorFrames : 0.0, perfMirrorFrames,
+                perfProbeNs / 1e6 / perfFrames, perfMaxNs / 1e6, mirrorEvery, mirrors.size()));
+            perfWindowStart = t3; perfFrames = perfMirrorFrames = 0;
+            perfPrimaryNs = perfMirrorNs = perfProbeNs = perfMaxNs = 0;
+        }
+    }
+
+    private void onUpdateWindowContentDirectRest(Window window, Drawable pixmap, short xOff, short yOff, long t1) {
         // Mirrors and the probe must finish before we return: Wine reuses the pixmap once the
         // Present path idles it.
-        for (VulkanRenderer m : mirrors) m.mirrorUpdateWindowContentDirect(window, pixmap, xOff, yOff);
+        // Span perf: the bottom panel only shows UI, so each mirror may be fed every Nth Present
+        // (mirrorEvery, 1 = every frame). A skipped frame costs the mirror nothing: no JNI call,
+        // no render-thread wake-up, no extra GPU pass / context switch / vkQueuePresent on its
+        // own VkDevice. A frame for a different target window, or the first frame after the
+        // throttle changes, always goes through so the bottom panel never shows a stale window.
+        if (!mirrors.isEmpty()) {
+            long target = did(window.getContent());
+            boolean newTarget = target != lastMirrorTarget;
+            lastMirrorTarget = target;
+            int every = mirrorEvery;
+            if (newTarget || every <= 1 || (++mirrorFrame % every) == 0) {
+                perfMirrorStart = System.nanoTime();
+                for (VulkanRenderer m : mirrors) m.mirrorUpdateWindowContentDirect(window, pixmap, xOff, yOff);
+                perfMirrorEnd = System.nanoTime();
+            }
+        }
         SpanFrameProbe probe = spanFrameProbe;
         if (probe != null && pixmap != null) {
             probe.onFrame(window, pixmap, window.getRootX() + xOff, window.getRootY() + yOff);
@@ -661,6 +719,14 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
         if (!flatPresentationEnabled) return;
         synchronized (lock) {
             if (nativeHandle == 0) return;
+            // Span perf: a pointer moving entirely outside the rect this renderer shows cannot
+            // change its image, so don't wake its render thread (each wake = a full GPU pass +
+            // present on this renderer's own VkDevice). Still forward the move that leaves the
+            // rect so the cursor is erased.
+            boolean inRect = pointerInSpanRect(x, y);
+            boolean skip = !inRect && !pointerWasInSpanRect;
+            pointerWasInSpanRect = inRect;
+            if (skip) return;
             nativeSetPointerPos(nativeHandle, x, y);
             Window pw = xServer.inputDeviceManager.getPointWindow();
             Cursor cursor = pw != null ? pw.attributes.getCursor() : null;
@@ -832,6 +898,21 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     public int getSpanSrcY() { return spanSrcY; }
     public int getSpanSrcW() { return spanSrcW; }
     public int getSpanSrcH() { return spanSrcH; }
+
+    // Span perf: feed mirrors every Nth Present (1 = every frame). Set by SpanDisplayController.
+    private volatile int mirrorEvery = 1;
+    private int mirrorFrame = 0;
+    private long lastMirrorTarget = -1;
+    public void setMirrorEvery(int n) { mirrorEvery = Math.max(1, Math.min(n, 8)); mirrorFrame = 0; }
+
+    /** True when (x, y) lies inside this renderer's span source rect, or span is off. */
+    private boolean pointerInSpanRect(int x, int y) {
+        if (spanSrcW <= 0 || spanSrcH <= 0) return true;
+        // 64 px slack so a cursor image straddling the edge is still drawn/erased.
+        return x >= spanSrcX - 64 && x < spanSrcX + spanSrcW + 64
+            && y >= spanSrcY - 64 && y < spanSrcY + spanSrcH + 64;
+    }
+    private boolean pointerWasInSpanRect = true;
 
     public void addMirror(VulkanRenderer r) { if (r != null && r != this) mirrors.addIfAbsent(r); }
     public void removeMirror(VulkanRenderer r) { mirrors.remove(r); }

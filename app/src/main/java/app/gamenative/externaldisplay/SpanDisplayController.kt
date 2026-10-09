@@ -56,6 +56,8 @@ class SpanDisplayController(
     private val primary: VulkanRenderer,
     private val splitX: Int,
     bottomPref: String = "",
+    /** Container extra `spanBottomEvery`: feed the bottom panel every Nth game frame (1..8). */
+    private val bottomEvery: Int = 1,
 ) {
     /** What the presentation display shows. */
     enum class BottomMode { SIDES, LEFT }
@@ -292,7 +294,9 @@ class SpanDisplayController(
             return null
         }
         r.setMirror(true)
-        r.setVkPresentMode(primary.getVkPresentMode())
+        primary.setMirrorEvery(bottomEvery)
+        // The bottom panel shows UI only and must never pace anything: never FIFO there.
+        r.setVkPresentMode(if (primary.getVkPresentMode() == 2) 1 /* MAILBOX */ else primary.getVkPresentMode())
         primary.getUnviewableWMClasses()?.let { r.setUnviewableWMClasses(*it) }
         // Off-canvas source = the clear colour, i.e. black while a glue screen is up.
         r.setSpanViewport(if (glueMode) screenW else srcX, 0, srcW, h)

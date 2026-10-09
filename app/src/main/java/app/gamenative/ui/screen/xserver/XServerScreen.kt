@@ -2667,6 +2667,7 @@ fun XServerScreen(
                             primary = primaryVk,
                             splitX = splitX,
                             bottomPref = spanBottomPref,
+                            bottomEvery = container.getExtra("spanBottomEvery", "2").trim().toIntOrNull() ?: 2,
                         ).apply { start() }
                     }
                 } else {
