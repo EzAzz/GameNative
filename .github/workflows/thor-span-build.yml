@@ -28,7 +28,16 @@ jobs:
           POSTHOG_HOST=https://us.i.posthog.com
           EOF
       - name: Build Span Perf APK
-        run: ./gradlew :app:assembleLegacySpanperf --stacktrace
+        run: |
+          set -o pipefail
+          ./gradlew :app:assembleLegacySpanperf 2>&1 | tee build.log
+      - name: Report build errors
+        if: failure()
+        run: |
+          grep -nE "error:|^e: |What went wrong|FAILED|Exception|> " build.log | grep -v "^.*> Task" | head -60 > errs.txt || true
+          tail -40 build.log >> errs.txt
+          split -l 12 errs.txt part_
+          for f in part_*; do echo "::error title=$f::$(sed 's/%/%25/g' $f | sed ':a;N;$!ba;s/\n/%0A/g')"; done
       - name: Collect APK
         run: |
           mkdir -p out
