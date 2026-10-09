@@ -46,6 +46,9 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
     private boolean pointerButtonLeftEnabled;
     private boolean pointerButtonRightEnabled;
     private float scrollAccumY;
+    // FF span: two-finger drag as a mouse wheel (PAN_MOUSE_WHEEL) -- px of finger travel per notch
+    private static final float WHEEL_STEP_PX = 36f;
+    private float wheelAccumY;
     private boolean scrolling;
     private float sensitivity;
     private final XServer xServer;
@@ -293,7 +296,34 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
         updateXform(w, h, screenInfo.width, screenInfo.height);
     }
 
+    // Span mode: map this view onto an absolute X-screen region instead of letterboxing the whole screen.
+    private boolean useCustomRegion = false;
+    private int regionOffsetX, regionOffsetY, regionWidth, regionHeight;
+
+    public void setAbsoluteRegion(int offsetX, int offsetY, int width, int height) {
+        useCustomRegion = true;
+        regionOffsetX = offsetX;
+        regionOffsetY = offsetY;
+        regionWidth = width;
+        regionHeight = height;
+        updateXform(getWidth(), getHeight(), width, height);
+    }
+
+    public void clearAbsoluteRegion() {
+        useCustomRegion = false;
+        if (getWidth() > 0 && getHeight() > 0) {
+            updateXform(getWidth(), getHeight(), xServer.screenInfo.width, xServer.screenInfo.height);
+        }
+    }
+
     private void updateXform(int outerWidth, int outerHeight, int innerWidth, int innerHeight) {
+        if (useCustomRegion) {
+            if (outerWidth <= 0 || outerHeight <= 0) return;
+            // x' = x * sx + ox (XForm.translate post-multiplies)
+            XForm.makeScale(this.xform, (float) regionWidth / outerWidth, (float) regionHeight / outerHeight);
+            XForm.translate(this.xform, regionOffsetX, regionOffsetY);
+            return;
+        }
         ViewTransformation viewTransformation = new ViewTransformation();
         viewTransformation.update(outerWidth, outerHeight, innerWidth, innerHeight);
         float invAspect = 1.0f / viewTransformation.aspect;
@@ -538,7 +568,13 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
         return true;
     }
 
-    void cancelTouchInput() {
+    /**
+     * Drop every in-flight gesture on this view: pending long-press / hold timers, any mouse button
+     * or pan key still held by a drag or a fired long press, and the deferred tap release.  Safe to
+     * call at any time; it is what an ACTION_CANCEL would do.  Span mode calls it before a bottom
+     * strip starts swallowing touch (glue mode) and on teardown, where no ACTION_CANCEL is delivered.
+     */
+    public void cancelTouchInput() {
         cancelSimulatedTouchPress();
         cancelPointerButtonLeft(fingerPointerButtonLeft);
         cancelPointerButtonRight(fingerPointerButtonRight);
@@ -1175,6 +1211,13 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
                     twoFingerDragging = true;
                     performClickDragAt(midX, midY, twoFingerDragAction);
                 }
+            } else if (TouchGestureConfig.PAN_MOUSE_WHEEL.equals(TouchGestureConfig.primaryAction(twoFingerDragAction))) {
+                // FF span: the wheel acts on whatever is under the pointer, so put it under the
+                // fingers first; small moves accumulate into whole notches (no 3 px dead zone).
+                twoFingerDragging = true;
+                float[] pt = XForm.transformPoint(xform, midX, midY);
+                moveCursorTo((int) pt[0], (int) pt[1]);
+                performWheelPan(dy);
             } else if (Math.abs(dx) > 3f || Math.abs(dy) > 3f) {
                 twoFingerDragging = true;
                 performPanAction(dx, dy, twoFingerDragAction);
@@ -1212,6 +1255,7 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
         }
         releasePanKeys();
         releaseAllDragButtons();
+        wheelAccumY = 0;
         twoFingerDragging = false;
         twoFingerTapPossible = false;
         twoFingerGestureMode = TWO_FINGER_GESTURE_NONE;
@@ -1379,6 +1423,7 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
         // Clean up two-finger state
         releasePanKeys();
         releaseAllDragButtons();
+        wheelAccumY = 0;
         twoFingerDragging = false;
         twoFingerTapPossible = false;
         twoFingerGestureMode = TWO_FINGER_GESTURE_NONE;
@@ -1817,6 +1862,17 @@ public class TouchpadView extends View implements View.OnCapturedPointerListener
                 xServer.injectKeyPress(pgKey);
                 xServer.injectKeyRelease(pgKey);
                 break;
+        }
+    }
+
+    // Natural (phone) direction: fingers moving UP bring later rows into view = wheel DOWN.
+    private void performWheelPan(float dy) {
+        wheelAccumY += dy;
+        while (Math.abs(wheelAccumY) >= WHEEL_STEP_PX) {
+            Pointer.Button button = wheelAccumY < 0 ? Pointer.Button.BUTTON_SCROLL_DOWN : Pointer.Button.BUTTON_SCROLL_UP;
+            xServer.injectPointerButtonPress(button);
+            xServer.injectPointerButtonRelease(button);
+            wheelAccumY += wheelAccumY < 0 ? WHEEL_STEP_PX : -WHEEL_STEP_PX;
         }
     }
 

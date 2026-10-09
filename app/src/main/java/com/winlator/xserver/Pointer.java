@@ -17,7 +17,7 @@ public class Pointer {
         }
     }
     public static final byte MAX_BUTTONS = 7;
-    private final ArrayList<OnPointerMotionListener> onPointerMotionListeners = new ArrayList<>();
+    private final java.util.concurrent.CopyOnWriteArrayList<OnPointerMotionListener> onPointerMotionListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final Bitmask buttonMask = new Bitmask();
     private final XServer xServer;
     private short x;
@@ -91,20 +91,23 @@ public class Pointer {
     }
 
     private void triggerOnPointerButtonPress(Button button) {
-        for (int i = onPointerMotionListeners.size()-1; i >= 0; i--) {
-            onPointerMotionListeners.get(i).onPointerButtonPress(button);
+        Object[] snapshot = onPointerMotionListeners.toArray();
+        for (int i = snapshot.length-1; i >= 0; i--) {
+            ((OnPointerMotionListener) snapshot[i]).onPointerButtonPress(button);
         }
     }
 
     private void triggerOnPointerButtonRelease(Button button) {
-        for (int i = onPointerMotionListeners.size()-1; i >= 0; i--) {
-            onPointerMotionListeners.get(i).onPointerButtonRelease(button);
+        Object[] snapshot = onPointerMotionListeners.toArray();
+        for (int i = snapshot.length-1; i >= 0; i--) {
+            ((OnPointerMotionListener) snapshot[i]).onPointerButtonRelease(button);
         }
     }
 
     private void triggerOnPointerMove(short x, short y) {
-        for (int i = onPointerMotionListeners.size()-1; i >= 0; i--) {
-            onPointerMotionListeners.get(i).onPointerMove(x, y);
+        Object[] snapshot = onPointerMotionListeners.toArray();
+        for (int i = snapshot.length-1; i >= 0; i--) {
+            ((OnPointerMotionListener) snapshot[i]).onPointerMove(x, y);
         }
     }
 }

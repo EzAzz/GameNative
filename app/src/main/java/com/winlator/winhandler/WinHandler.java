@@ -139,6 +139,15 @@ public class WinHandler {
     }
 
     static {
+        // evshim's constructor maps gamepad_shm at load time and falls back to
+        // /data/data/app.gamenative/files. A side-by-side build (other applicationId) can't open
+        // that, so notifyStateChanged() never bumps the seq word Wine waits on: dead controller.
+        try {
+            android.system.Os.setenv("EVSHIM_BASE_PATH",
+                    "/data/data/" + app.gamenative.BuildConfig.APPLICATION_ID + "/files", true);
+        } catch (android.system.ErrnoException e) {
+            Log.e(TAG, "setenv EVSHIM_BASE_PATH failed", e);
+        }
         System.loadLibrary("evshim");
     }
 
@@ -731,7 +740,7 @@ public class WinHandler {
                     "gamepad_shm"
             );
 
-            if (!gamepadShmDir.exists() && !gamepadShmDir.mkdirs()) {
+            if (!gamepadShmDir.isDirectory() && !gamepadShmDir.mkdirs() && !gamepadShmDir.isDirectory()) {
                 throw new IOException("Failed to create directory: " + gamepadShmDir.getAbsolutePath());
             }
 

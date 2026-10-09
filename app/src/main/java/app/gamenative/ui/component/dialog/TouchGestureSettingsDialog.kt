@@ -571,6 +571,7 @@ private fun panSingleActionLabel(action: String): String = when (action) {
     PAN_INVERTED_ARROW_KEYS -> stringResource(R.string.gesture_pan_inverted_arrow_keys)
     PAN_LEFT_CLICK_DRAG -> stringResource(R.string.gesture_pan_left_click_drag)
     PAN_RIGHT_CLICK_DRAG -> stringResource(R.string.gesture_pan_right_click_drag)
+    TouchGestureConfig.PAN_MOUSE_WHEEL -> "Mouse wheel (scroll)"
     else -> action
 }
 

@@ -142,6 +142,40 @@ object PrefManager {
         }
     }
 
+    private val undecryptableKeysLogged = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /**
+     * Reads a Keystore-encrypted pref. Returns null when it is absent OR cannot be decrypted.
+     *
+     * Undecryptable happens when the DataStore was copied from another install (e.g. a
+     * side-by-side fork package): the ciphertext belongs to the other package's Keystore key,
+     * so KeyMint fails (-38 INVALID_ARGUMENT / BadPadding / ProviderException). Keystore keys
+     * cannot be migrated, so the value is unrecoverable -- treat it as "not logged in" and drop
+     * it (only if it is still the same bytes, so a freshly written token is never clobbered).
+     * Catches Exception on purpose, matching NexusOAuthStorage.readEncrypted.
+     */
+    private fun decryptPrefOrNull(key: Preferences.Key<ByteArray>): ByteArray? {
+        val encryptedBytes = getPref(key, ByteArray(0))
+        if (encryptedBytes.isEmpty()) return null
+        return try {
+            Crypto.decrypt(encryptedBytes)
+        } catch (e: Exception) {
+            if (undecryptableKeysLogged.add(key.name)) {
+                Timber.tag("Crypto").w(
+                    "Stored %s could not be decrypted (%s); ignoring it (treated as absent)",
+                    key.name,
+                    e.javaClass.simpleName,
+                )
+            }
+            scope.launch {
+                dataStore.edit { pref ->
+                    if (pref[key]?.contentEquals(encryptedBytes) == true) pref.remove(key)
+                }
+            }
+            null
+        }
+    }
+
     /* Manifest Cache */
     private val COMPONENT_MANIFEST_JSON = stringPreferencesKey("component_manifest_json")
     var componentManifestJson: String
@@ -815,15 +849,7 @@ object PrefManager {
 
     private val ACCESS_TOKEN_ENC = byteArrayPreferencesKey("access_token_enc")
     var accessToken: String
-        get() {
-            val encryptedBytes = getPref(ACCESS_TOKEN_ENC, ByteArray(0))
-            return if (encryptedBytes.isEmpty()) {
-                ""
-            } else {
-                val bytes = Crypto.decrypt(encryptedBytes)
-                String(bytes)
-            }
-        }
+        get() = decryptPrefOrNull(ACCESS_TOKEN_ENC)?.let { String(it) } ?: ""
         set(value) {
             val bytes = Crypto.encrypt(value.toByteArray())
             setPref(ACCESS_TOKEN_ENC, bytes)
@@ -831,15 +857,7 @@ object PrefManager {
 
     private val REFRESH_TOKEN_ENC = byteArrayPreferencesKey("refresh_token_enc")
     var refreshToken: String
-        get() {
-            val encryptedBytes = getPref(REFRESH_TOKEN_ENC, ByteArray(0))
-            return if (encryptedBytes.isEmpty()) {
-                ""
-            } else {
-                val bytes = Crypto.decrypt(encryptedBytes)
-                String(bytes)
-            }
-        }
+        get() = decryptPrefOrNull(REFRESH_TOKEN_ENC)?.let { String(it) } ?: ""
         set(value) {
             val bytes = Crypto.encrypt(value.toByteArray())
             setPref(REFRESH_TOKEN_ENC, bytes)
@@ -1041,10 +1059,7 @@ object PrefManager {
     val discordRelayTokenPresent = mutableStateOf(false)
     var discordRelayToken: String
         get() {
-            val encryptedBytes = getPref(DISCORD_RELAY_TOKEN_ENC, ByteArray(0))
-            if (encryptedBytes.isNotEmpty()) {
-                return String(Crypto.decrypt(encryptedBytes))
-            }
+            decryptPrefOrNull(DISCORD_RELAY_TOKEN_ENC)?.let { return String(it) }
             val legacy = getPref(DISCORD_RELAY_TOKEN, "")
             if (legacy.isNotEmpty()) {
                 setPref(DISCORD_RELAY_TOKEN_ENC, Crypto.encrypt(legacy.toByteArray()))

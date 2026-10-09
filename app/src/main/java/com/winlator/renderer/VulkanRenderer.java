@@ -21,6 +21,7 @@ import com.winlator.xserver.XLock;
 import com.winlator.xserver.XServer;
 
 import java.util.ArrayList;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class VulkanRenderer implements WindowManager.OnWindowModificationListener,
                                        Pointer.OnPointerMotionListener,
@@ -46,6 +47,14 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     private final XServer xServer;
     private long nativeHandle = 0;
     private final Object lock = new Object();
+
+    // Span mode (dual-screen): the X-screen source rect this renderer shows at 1:1. spanSrcW == 0 = off.
+    private volatile int spanSrcX = 0, spanSrcY = 0, spanSrcW = 0, spanSrcH = 0;
+    // Secondary renderers that must also receive Present-path frames (PresentExtension only talks to xServer.getRenderer()).
+    private final CopyOnWriteArrayList<VulkanRenderer> mirrors = new CopyOnWriteArrayList<>();
+    private volatile boolean released = false;
+    private volatile boolean isMirror = false;
+    private final java.util.concurrent.atomic.AtomicInteger mirrorCallsInFlight = new java.util.concurrent.atomic.AtomicInteger();
 
     public final ViewTransformation viewTransformation = new ViewTransformation();
     private boolean fullscreen = false;
@@ -197,6 +206,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     }
 
     public void onSurfaceCreated(Surface surface) {
+        if (released) return;
         if (!gpuImageChecked) { GPUImage.checkIsSupported(); gpuImageChecked = true; }
         if (initExecutor != null) {
             initExecutor.shutdownNow();
@@ -347,6 +357,12 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
 
     private void updateTransform() {
         if (nativeHandle == 0) return;
+        if (spanSrcW > 0 && spanSrcH > 0) {
+            float sx = (float) xServer.screenInfo.width / spanSrcW;
+            float sy = (float) xServer.screenInfo.height / spanSrcH;
+            nativeSetTransform(nativeHandle, -spanSrcX * sx, -spanSrcY * sy, sx, sy);
+            return;
+        }
         if (fullscreen || outputScalingMode == SCALE_STRETCH) {
             nativeSetTransform(nativeHandle, 0, 0, 1.0f, 1.0f);
             nativeScanoutSetDst(nativeHandle,
@@ -493,6 +509,38 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     }
 
     public void onUpdateWindowContentDirect(Window window, Drawable pixmap, short xOff, short yOff) {
+        onUpdateWindowContentDirectImpl(window, pixmap, xOff, yOff);
+        // Mirrors and the probe must finish before we return: Wine reuses the pixmap once the
+        // Present path idles it.
+        for (VulkanRenderer m : mirrors) m.mirrorUpdateWindowContentDirect(window, pixmap, xOff, yOff);
+        SpanFrameProbe probe = spanFrameProbe;
+        if (probe != null && pixmap != null) {
+            probe.onFrame(window, pixmap, window.getRootX() + xOff, window.getRootY() + yOff);
+        }
+    }
+
+    /**
+     * Span mode: sees every Present-path frame (root position of the pixmap) before it is released.
+     * pixmap.width is the buffer's padded row length, not the image width -- use the window's size.
+     */
+    public interface SpanFrameProbe {
+        void onFrame(Window window, Drawable pixmap, int rootX, int rootY);
+    }
+
+    private volatile SpanFrameProbe spanFrameProbe;
+
+    public void setSpanFrameProbe(SpanFrameProbe probe) { spanFrameProbe = probe; }
+
+    private void mirrorUpdateWindowContentDirect(Window window, Drawable pixmap, short xOff, short yOff) {
+        mirrorCallsInFlight.incrementAndGet();
+        try {
+            if (!released) onUpdateWindowContentDirectImpl(window, pixmap, xOff, yOff);
+        } finally {
+            mirrorCallsInFlight.decrementAndGet();
+        }
+    }
+
+    private void onUpdateWindowContentDirectImpl(Window window, Drawable pixmap, short xOff, short yOff) {
         if (!flatPresentationEnabled) return;
         if (hudRef != null && !nativeMode) hudRef.update();
         if (nativeHandle == 0 || pixmap == null) return;
@@ -506,7 +554,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
                 GPUImage g = (GPUImage) texture;
                 long ahbPtr = g.getHardwareBufferPtr();
                 if (ahbPtr != 0) {
-                    if (nativeMode && pixmap.isDirectScanout() && nativeIsScanoutActive(nativeHandle)) {
+                    if (!isMirror && nativeMode && pixmap.isDirectScanout() && nativeIsScanoutActive(nativeHandle)) {
                         int fenceFd = g.unlock();
                         nativeScanoutSetBuffer(nativeHandle, ahbPtr,
                             rx, ry, pixmap.width, pixmap.height, fenceFd);
@@ -543,6 +591,16 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
 
     @Override
     public void onUpdateWindowContent(Window window) {
+        if (!isMirror) { onUpdateWindowContentImpl(window); return; }
+        mirrorCallsInFlight.incrementAndGet();
+        try {
+            if (!released) onUpdateWindowContentImpl(window);
+        } finally {
+            mirrorCallsInFlight.decrementAndGet();
+        }
+    }
+
+    private void onUpdateWindowContentImpl(Window window) {
         if (!flatPresentationEnabled) return;
         if (hudRef != null) hudRef.update();
         final long handle;
@@ -564,7 +622,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
                 GPUImage g = (GPUImage) drawable.getTexture();
                 long ahbPtr = g.getHardwareBufferPtr();
                 if (ahbPtr != 0) {
-                    boolean scanoutNow = nativeMode && nativeIsScanoutActive(handle);
+                    boolean scanoutNow = !isMirror && nativeMode && nativeIsScanoutActive(handle);
                     if (nativeMode && drawable.isDirectScanout() && scanoutNow) {
                         boolean wasDelivered = nativeIsGameFrameDelivered(handle);
                         int fenceFd = g.unlock();
@@ -663,6 +721,7 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
         synchronized (lock) {
             if (nativeHandle != 0) { nativeSetCursorVisible(nativeHandle, visible); if (visible) sendCursorToNative(lastCursor); }
         }
+        for (VulkanRenderer m : mirrors) m.setCursorVisible(visible);
     }
 
     public boolean isCursorVisible() { return cursorVisible; }
@@ -674,12 +733,16 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
      */
     public void updateVisualCursorPosition(int x, int y) {
         synchronized (lock) {
-            if (nativeHandle == 0) return;
-            nativeSetPointerPos(nativeHandle, (short) x, (short) y);
+            if (nativeHandle != 0) nativeSetPointerPos(nativeHandle, (short) x, (short) y);
         }
+        for (VulkanRenderer m : mirrors) m.updateVisualCursorPosition(x, y);
     }
 
     public void setNativeMode(boolean mode) {
+        if (mode && (isSpanMode() || isMirror)) {
+            android.util.Log.w("VulkanRenderer", "setNativeMode(true) refused: span mode / mirror renderer");
+            return;
+        }
         if (this.nativeMode == mode) return;
         this.nativeMode = mode;
         xRenderingPausedForScanout = false;
@@ -753,6 +816,64 @@ public class VulkanRenderer implements WindowManager.OnWindowModificationListene
     }
 
     public boolean isNativeMode() { return nativeMode; }
+
+    // ---- Span mode (dual-screen) ----
+
+    /** Show only X-screen rect (x, y, w, h) stretched over this surface; w == 0 turns span off. */
+    public void setSpanViewport(int x, int y, int w, int h) {
+        synchronized (lock) {
+            spanSrcX = x; spanSrcY = y; spanSrcW = w; spanSrcH = h;
+            updateTransform();
+        }
+    }
+
+    public boolean isSpanMode() { return spanSrcW > 0 && spanSrcH > 0; }
+    public int getSpanSrcX() { return spanSrcX; }
+    public int getSpanSrcY() { return spanSrcY; }
+    public int getSpanSrcW() { return spanSrcW; }
+    public int getSpanSrcH() { return spanSrcH; }
+
+    public void addMirror(VulkanRenderer r) { if (r != null && r != this) mirrors.addIfAbsent(r); }
+    public void removeMirror(VulkanRenderer r) { mirrors.remove(r); }
+    public void setMirror(boolean mirror) { this.isMirror = mirror; }
+    public boolean isMirror() { return isMirror; }
+    public String[] getUnviewableWMClasses() { return unviewableWMClasses; }
+    public int getVkPresentMode() { return pendingPresentMode; }
+
+    /** Permanently tear down this renderer (listeners, init thread, native context). Used for span mirrors. */
+    public void release() {
+        if (released) return;
+        released = true;
+        xServer.windowManager.removeOnWindowModificationListener(this);
+        xServer.pointer.removeOnPointerMotionListener(this);
+        // Bounded wait for frame uploads already running on the X / Present threads.
+        long deadline = System.nanoTime() + 1_000_000_000L;
+        while (mirrorCallsInFlight.get() > 0 && System.nanoTime() < deadline) {
+            try { Thread.sleep(1); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); break; }
+        }
+        mirrors.clear();
+        initComplete = false;
+        if (initExecutor != null) {
+            initExecutor.shutdownNow();
+            try { initExecutor.awaitTermination(3, java.util.concurrent.TimeUnit.SECONDS); }
+            catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            initExecutor = null;
+        }
+        synchronized (lock) {
+            if (nativeHandle != 0) {
+                if (mirrorCallsInFlight.get() > 0) {
+                    // A mirror call is still in flight on the native handle after the bounded wait;
+                    // destroying now would race a use-after-free. Leak deliberately instead.
+                    android.util.Log.w("VulkanRenderer", "release(): mirrorCallsInFlight=" + mirrorCallsInFlight.get() + " after deadline, skipping nativeDestroy (deliberate leak)");
+                    nativeHandle = 0;
+                } else {
+                    if (nativeMode) nativeDestroyScanout(nativeHandle);
+                    nativeDestroy(nativeHandle);
+                    nativeHandle = 0;
+                }
+            }
+        }
+    }
 
     public void setDriverInfo(String driverPath, String libraryName, String nativeLibDir) {
         this.driverPath = driverPath;

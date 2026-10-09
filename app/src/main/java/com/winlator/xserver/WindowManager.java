@@ -27,7 +27,7 @@ public class WindowManager extends XResourceManager {
     public final DrawableManager drawableManager;
     private Window focusedWindow;
     private FocusRevertTo focusRevertTo = FocusRevertTo.NONE;
-    private final ArrayList<OnWindowModificationListener> onWindowModificationListeners = new ArrayList<>();
+    private final java.util.concurrent.CopyOnWriteArrayList<OnWindowModificationListener> onWindowModificationListeners = new java.util.concurrent.CopyOnWriteArrayList<>();
 
     public interface OnWindowModificationListener {
         default void onMapWindow(Window window) {}
@@ -330,44 +330,51 @@ public class WindowManager extends XResourceManager {
     }
 
     private void triggerOnMapWindow(Window window) {
-        for (int i = onWindowModificationListeners.size()-1; i >= 0; i--) {
-            onWindowModificationListeners.get(i).onMapWindow(window);
+        Object[] snapshot = onWindowModificationListeners.toArray();
+        for (int i = snapshot.length-1; i >= 0; i--) {
+            ((OnWindowModificationListener) snapshot[i]).onMapWindow(window);
         }
     }
 
     private void triggerOnUnmapWindow(Window window) {
-        for (int i = onWindowModificationListeners.size()-1; i >= 0; i--) {
-            onWindowModificationListeners.get(i).onUnmapWindow(window);
+        Object[] snapshot = onWindowModificationListeners.toArray();
+        for (int i = snapshot.length-1; i >= 0; i--) {
+            ((OnWindowModificationListener) snapshot[i]).onUnmapWindow(window);
         }
     }
 
     private void triggerOnChangeWindowZOrder(Window window) {
-        for (int i = onWindowModificationListeners.size()-1; i >= 0; i--) {
-            onWindowModificationListeners.get(i).onChangeWindowZOrder(window);
+        Object[] snapshot = onWindowModificationListeners.toArray();
+        for (int i = snapshot.length-1; i >= 0; i--) {
+            ((OnWindowModificationListener) snapshot[i]).onChangeWindowZOrder(window);
         }
     }
 
     protected void triggerOnUpdateWindowContent(Window window) {
-        for (int i = onWindowModificationListeners.size()-1; i >= 0; i--) {
-            onWindowModificationListeners.get(i).onUpdateWindowContent(window);
+        Object[] snapshot = onWindowModificationListeners.toArray();
+        for (int i = snapshot.length-1; i >= 0; i--) {
+            ((OnWindowModificationListener) snapshot[i]).onUpdateWindowContent(window);
         }
     }
 
     protected void triggerOnUpdateWindowGeometry(Window window, boolean resized) {
-        for (int i = onWindowModificationListeners.size()-1; i >= 0; i--) {
-            onWindowModificationListeners.get(i).onUpdateWindowGeometry(window, resized);
+        Object[] snapshot = onWindowModificationListeners.toArray();
+        for (int i = snapshot.length-1; i >= 0; i--) {
+            ((OnWindowModificationListener) snapshot[i]).onUpdateWindowGeometry(window, resized);
         }
     }
 
     public void triggerOnUpdateWindowAttributes(Window window, Bitmask mask) {
-        for (int i = onWindowModificationListeners.size()-1; i >= 0; i--) {
-            onWindowModificationListeners.get(i).onUpdateWindowAttributes(window, mask);
+        Object[] snapshot = onWindowModificationListeners.toArray();
+        for (int i = snapshot.length-1; i >= 0; i--) {
+            ((OnWindowModificationListener) snapshot[i]).onUpdateWindowAttributes(window, mask);
         }
     }
 
     public void triggerOnModifyWindowProperty(Window window, Property property) {
-        for (int i = onWindowModificationListeners.size()-1; i >= 0; i--) {
-            onWindowModificationListeners.get(i).onModifyWindowProperty(window, property);
+        Object[] snapshot = onWindowModificationListeners.toArray();
+        for (int i = snapshot.length-1; i >= 0; i--) {
+            ((OnWindowModificationListener) snapshot[i]).onModifyWindowProperty(window, property);
         }
     }
 }

@@ -77,7 +77,19 @@ public class XServerView extends SurfaceView implements SurfaceHolder.Callback, 
     }
 
     public void queueEvent(Runnable r) {
-        eventExecutor.execute(r);
+        try {
+            eventExecutor.execute(r);
+        } catch (java.util.concurrent.RejectedExecutionException ignored) {
+            // released (span mirror view): drop late scene updates
+        }
+    }
+
+    /** Permanently release this view's renderer and event thread (span-mode secondary view). */
+    public void release() {
+        if (renderer instanceof VulkanRenderer vkRenderer) {
+            vkRenderer.release();
+        }
+        eventExecutor.shutdown();
     }
 
     public void onPause() {}

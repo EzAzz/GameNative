@@ -68,6 +68,10 @@ android {
         versionName = "1.2.1"
 
         buildConfigField("boolean", "GOLD", "false")
+        // Span mode defaults when the container has no spanDisplay / spanBottom extra.
+        // Off everywhere except the spantest build type below; a container extra always wins.
+        buildConfigField("boolean", "SPAN_DEFAULT", "false")
+        buildConfigField("String", "SPAN_BOTTOM_DEFAULT", "\"\"")
         fun secret(name: String) =
             project.findProperty(name) as String? ?: System.getenv(name) ?: ""
 
@@ -177,6 +181,25 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             signingConfig = signingConfigs.getByName("pluvia")
+        }
+        create("span") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".span"
+            signingConfig = signingConfigs.getByName("debug")
+            resValue("string", "app_name", "GameNative Span")
+            // :ubuntufs (and any other module dep) only ships debug/release variants;
+            // without this, AGP can't resolve a "span" variant for those modules.
+            matchingFallbacks += listOf("debug")
+        }
+        // Rootless span test build: span mode + home-screen bottom layout are ON by default, so a
+        // user only sets Screen Size = Custom 4400x1080 in the container's own settings.
+        create("spantest") {
+            initWith(getByName("span"))
+            applicationIdSuffix = ".spantest"
+            resValue("string", "app_name", "Span Test")
+            matchingFallbacks += listOf("debug")
+            buildConfigField("boolean", "SPAN_DEFAULT", "true")
+            buildConfigField("String", "SPAN_BOTTOM_DEFAULT", "\"left\"")
         }
         create("release-gold") {
             isMinifyEnabled = true

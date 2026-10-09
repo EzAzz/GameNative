@@ -106,6 +106,7 @@ import app.gamenative.ui.enums.Orientation
 import java.util.EnumSet
 import app.gamenative.externaldisplay.ExternalDisplayInputController
 import app.gamenative.externaldisplay.ExternalDisplaySwapController
+import app.gamenative.externaldisplay.SpanDisplayController
 import app.gamenative.externaldisplay.SwapInputOverlayView
 import app.gamenative.powercontrol.PowerManager
 import app.gamenative.service.AchievementWatcher
@@ -575,7 +576,7 @@ fun XServerScreen(
     var isTouchscreenModeActive by remember { mutableStateOf(container.isTouchscreenMode) }
     var isShooterModeActive by remember(container.id) { mutableStateOf(container.isShooterMode) }
     var currentGestureConfig by remember {
-        mutableStateOf(app.gamenative.data.TouchGestureConfig.fromJson(container.getGestureConfig()))
+        mutableStateOf(app.gamenative.data.TouchGestureConfig.forContainer(container.getGestureConfig(), container.getExtra("spanDisplay", "false").equals("true", true)))
     }
     var currentShooterConfig by remember(container.id) {
         mutableStateOf(ShooterModeConfig.fromJson(container.getShooterConfig()))
@@ -1985,6 +1986,13 @@ fun XServerScreen(
             // other containers as well. Uncheck the per-container useLegacyRenderer
             // setting to switch to the Vulkan renderer.
             val useGLRenderer = container.graphicsDriver == "virgl" || container.displayRenderer.equals("gl", true)
+            // Span mode (AYN Thor): the X screen spans display 0 (x < splitX) and the presentation display (x >= splitX).
+            // The fallbacks are build-type defaults (on only in the spantest build); a container extra wins.
+            val spanEnabled = container.getExtra("spanDisplay", BuildConfig.SPAN_DEFAULT.toString()).equals("true", true) && !useGLRenderer
+            val spanSplitXPref = container.getExtra("spanSplitX", "1920").trim().toIntOrNull() ?: 1920
+            // What the presentation display shows: "left" = only the canvas's left region (home
+            // screen), anything else / absent = today's two side strips. Validated in the controller.
+            val spanBottomPref = container.getExtra("spanBottom", BuildConfig.SPAN_BOTTOM_DEFAULT)
             val xServerViewInstance: XServerRendererView = if (useGLRenderer) {
                 XServerViewGL(context, xServerToUse)
             } else {
@@ -2240,7 +2248,7 @@ fun XServerScreen(
                             } else if (container.isTouchscreenMode()) {
                                 PluviaApp.touchpadView?.setTouchscreenMode(true)
                                 // Apply per-game gesture configuration
-                                val gestureConfig = app.gamenative.data.TouchGestureConfig.fromJson(container.getGestureConfig())
+                                val gestureConfig = app.gamenative.data.TouchGestureConfig.forContainer(container.getGestureConfig(), container.getExtra("spanDisplay", "false").equals("true", true))
                                 PluviaApp.touchpadView?.setGestureConfig(gestureConfig)
                             }
                             Timber.d("WinHandler configured: preferredInputApi=%s, dinputMapperType=0x%02x", PreferredInputApi.values()[container.inputType], container.dinputMapperType)
@@ -2586,8 +2594,13 @@ fun XServerScreen(
             frameLayout.addView(overlay)
             swapInputOverlay = overlay
 
+            // spanEnabled is the raw config flag; span setup silently no-ops when the renderer
+            // isn't VulkanRenderer (e.g. "surfaceflinger"), so gate on the effective state instead
+            // of the raw flag or the external-display / swap controllers stay wrongly disabled.
+            val spanActive = spanEnabled && xServerView.getxServer().renderer is VulkanRenderer
+
             val externalDisplayController =
-                if (!swapEnabled && configuredExternalMode != ExternalDisplayInputController.Mode.OFF) {
+                if (!swapEnabled && configuredExternalMode != ExternalDisplayInputController.Mode.OFF && !spanActive) {
                     ExternalDisplayInputController(
                         context = context,
                         xServer = xServerView.getxServer(),
@@ -2601,7 +2614,7 @@ fun XServerScreen(
                 }
 
             val swapController =
-                if (swapEnabled) {
+                if (swapEnabled && !spanActive) {
                     val surfaceBg = ContextCompat.getColor(context, R.color.external_display_surface_background)
                     ExternalDisplaySwapController(
                         context = context,
@@ -2635,12 +2648,38 @@ fun XServerScreen(
                 } else {
                     null
                 }
+            val spanController: SpanDisplayController? =
+                if (spanActive) {
+                    val spanXServer = xServerView.getxServer()
+                    val primaryVk = spanXServer.renderer as? VulkanRenderer
+                    if (primaryVk == null) {
+                        Timber.tag("SpanDisplay").w("spanDisplay=true but the renderer is not VulkanRenderer; span mode skipped")
+                        null
+                    } else {
+                        val spanW = spanXServer.screenInfo.width.toInt()
+                        val spanH = spanXServer.screenInfo.height.toInt()
+                        val splitX = spanSplitXPref.coerceIn(1, maxOf(1, spanW - 1))
+                        // start() maps top-screen touches onto the centred game view.
+                        Timber.tag("SpanDisplay").d("span %dx%d split %d bottom \"%s\"", spanW, spanH, splitX, spanBottomPref)
+                        SpanDisplayController(
+                            context = context,
+                            xServer = spanXServer,
+                            primary = primaryVk,
+                            splitX = splitX,
+                            bottomPref = spanBottomPref,
+                        ).apply { start() }
+                    }
+                } else {
+                    null
+                }
             mainRoot.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
                 override fun onViewAttachedToWindow(v: View) {}
 
                 override fun onViewDetachedFromWindow(v: View) {
                     externalDisplayController?.stop()
                     swapController?.stop()
+                    spanController?.stop()
+                    PluviaApp.touchpadView?.clearAbsoluteRegion()
                 }
             })
             // Don't call hideInputControls() here - let the auto-show logic below handle visibility

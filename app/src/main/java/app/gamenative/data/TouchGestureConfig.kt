@@ -162,6 +162,8 @@ data class TouchGestureConfig(
         const val PAN_INVERTED_MIDDLE_MOUSE = "inverted_middle_mouse_pan"
         const val PAN_LEFT_CLICK_DRAG = "left_click_drag"
         const val PAN_RIGHT_CLICK_DRAG = "right_click_drag"
+        // FF span (WoW bottom screen, 2026-09-25): the drag scrolls the list under the fingers
+        const val PAN_MOUSE_WHEEL = "mouse_wheel"
 
         // ── Action identifiers: pinch (zoom) ─────────────────────────────
         const val ZOOM_SCROLL_WHEEL = "scroll_wheel"
@@ -220,6 +222,16 @@ data class TouchGestureConfig(
             threeFingerTapEnabled = false,
             threeFingerHoldEnabled = false,
         )
+
+        /**
+         * FF span (AYN Thor, 2026-09-25): a span container with no saved gesture JSON gets a
+         * two-finger drag = mouse wheel on the TOP screen too (the Shop opens there; the
+         * arrow-key default turned the character). A saved per-game choice always wins.
+         */
+        fun forContainer(json: String?, span: Boolean): TouchGestureConfig {
+            val config = fromJson(json)
+            return if (span && json.isNullOrBlank()) config.copy(twoFingerDragAction = PAN_MOUSE_WHEEL) else config
+        }
 
         /** Parse from a JSON string. Returns compatibility-safe defaults when the string is null, blank or invalid. */
         fun fromJson(json: String?): TouchGestureConfig {
@@ -311,6 +323,7 @@ data class TouchGestureConfig(
             PAN_INVERTED_MIDDLE_MOUSE,
             PAN_LEFT_CLICK_DRAG,
             PAN_RIGHT_CLICK_DRAG,
+            PAN_MOUSE_WHEEL,
         )
 
         val MOUSE_DRAG_MOVEMENT_MODES = listOf(
